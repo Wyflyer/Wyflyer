@@ -1,0 +1,165 @@
+%--------------想通过ofdm来实现对ls&mmse信道估计和zf均衡的熟悉--------------------
+clear all;
+close all;
+clc;
+%%%多径衰落信道下的OFDM传输
+%%%调制方式：QPSK
+%%%信道编码方式：无
+%%%导频方式：梳状类型
+%% 参数设定
+para = 52;            %设定子载波数
+Nfft = 64;            %FFT长度
+Ncp = 16;             %循环前缀的长度
+Nf = Nfft + Ncp;      %1个完整OFDM符号长度
+Nb = 4;               %每帧包含的OFDM符号数
+Ns = 1000;            %在一个信噪比下的帧数
+pilot_inter = 6;      %导频间隔
+SNR = 0:15;           %信噪比
+snr1 = 10.^(SNR/10);
+M = 4;                %qpsk
+pilot_loc = [];       %导频位置
+%% 产生基带信号
+
+qpsk_base1 = randi([0 3],para*Nb*Ns,1);    %产生[0 1 2 3]序列
+
+%% qpsk调制
+data = pskmod(qpsk_base1,M,pi/4);          %qpsk编码
+
+%% 插入导频
+data_station = [];                          %数据位置
+pilot_num = ceil(Nfft/pilot_inter);         %导频数目
+pilot_loc = 1:pilot_inter:Nfft;
+p_in = 1+1*j;
+for i=1:Nfft                                %确定数据的位置
+    if mod(i,pilot_inter)~=1
+        data_station=[data_station,i];
+    end
+end
+data_row = length(data_station);                            %行数目
+data_col = ceil(length(data)/data_row);                     %列数目
+pilot_pin = ones(pilot_num,data_col)*p_in;                  %导频放在矩阵中
+data_pf = zeros(Nfft,data_col);                             %预设整个矩阵
+data_pf(pilot_loc(1:end),:) = pilot_pin;
+if data_row*data_col>length(data)
+    datac=[data;zeros(data_row*data_col-length(data),1)];   %补齐每一行
+end
+
+%% 串并变换    确定有导频和无导频
+
+data2 = reshape(data,para,[]);
+data2_n = zeros(Nfft,Nb*Ns);
+data2_n(2:27,:) = data2(1:26,:);
+data2_n(39:end,:) = data2(27:end,:);        %无导频
+
+datac_y = reshape(datac,data_row,data_col);
+data_pf(data_station(1:end),:)=datac_y;      %有导频
+
+%% IFFT--------------实现了时域上的正交
+
+data_ifftn=ifft(data2_n);
+data_iffty=ifft(data_pf);
+
+%% 加cp
+data_cpn = [data_ifftn(Nfft-Ncp+1:end,:);data_ifftn];   %无导频加入循环前缀
+data_cpy = [data_iffty(Nfft-Ncp+1:end,:);data_iffty];   %有导频加入循环前缀
+
+%% 并串变换
+
+data_cpn_ps = reshape(data_cpn,[],1);
+data_cpy_ps = reshape(data_cpy,[],1);
+
+%% 通过高斯和多径瑞利信道
+
+for kk = 1:length(SNR)
+data_awgn = awgn(data_cpn_ps,SNR(kk),'measured');         %无导频过高斯信道
+h_normal = sort(rand(1,3),'descend');
+aa=norm(h_normal);
+h_impluse = zeros(1,Ncp);
+insert_random = randi([2,Ncp-1],1);
+h_impluse(1) = h_normal(1)/aa;
+h_impluse(insert_random) = 0.1*h_normal(2)/aa;
+h_impluse(end) = 0.01*h_normal(3)/aa;                      %确定信道冲击h
+data_rayleigh = conv(data_cpy_ps,h_impluse');              %有导频过多径瑞利信道
+data_rayleigh_awgn = awgn(data_rayleigh(1:length(data_cpy_ps)),SNR(kk),'measured');
+
+%% 串并转换
+
+data_cpn_ps1 = reshape(data_awgn,Nfft+Ncp,[]);
+data_cpy_ps1 = reshape(data_rayleigh_awgn,Nfft+Ncp,[]);
+
+%% 去cp
+
+data_cpn1 = data_cpn_ps1(Ncp+1:end,:);
+data_cpy2 = data_cpy_ps1(Ncp+1:end,:);
+
+%% FFT
+
+data_fftn=fft(data_cpn1);
+data_ffty=fft(data_cpy2);
+
+%% 信道估计均衡ls_zf
+%---------------信道估计ls----------------------------
+data_ls = data_ffty;
+data_pliot_ls = data_ls(pilot_loc,:);            %取出接收到的导频
+H_ls_pin = data_pliot_ls./pilot_pin;             %LS算法
+H_ls = interp1(pilot_loc(1:end),H_ls_pin,data_station(1:end),'linear','extrap');
+%内插法，通过导频估计出的H_ls_pin来估计数据的H_ls
+
+%----------------均衡zf----------------------------------
+data_zf = data_ls(data_station(1:end),:)./H_ls;         %ls&zf均衡
+data_back_ls = reshape(data_zf,[],1);                   %并串变换
+data_back_ls = data_back_ls(1:length(data));            %去除多于填充值
+data_base_back_ls = pskdemod(data_back_ls,M,pi/4);      %对过ls&zf的信号进行解调（0 1 2 3）
+
+%% 信道估计均衡mmse_zf
+%---------------信道估计mmse----------------------------
+k = 1:length(h_impluse);                    %k_ts=k*ts
+hh = h_impluse*h_impluse';
+tmp = h_impluse.*conj(h_impluse).*k;        %tmp=h.*conj(h).*k_ts
+r = sum(tmp)/hh;
+r2 = tmp*k.'/hh;                            %r2=tmp*k.'/hh
+tau_rms = sqrt(r2-r^2);                     %rms时延
+df = 1/Nfft;                                %1/(ts*Nfft)
+j2pi_tau_df = j*2*pi*tau_rms*df;
+K1 = repmat([0:length(data_station)-1].',1,pilot_num);
+K2 = repmat([0:pilot_num-1],length(data_station),1);       %!!!!!!!
+rf = 1./(1+j2pi_tau_df*(K1-K2*pilot_inter));                %!!!!!!!
+K3 = repmat([0:pilot_num-1].',1,pilot_num);
+K4 = repmat([0:pilot_num-1],pilot_num,1);
+rf2 = 1./(1+j2pi_tau_df*pilot_inter*(K3-K4));
+Rhp = rf;
+Rpp = rf2 + eye(length(rf2),length(rf2))/snr1(kk);
+H_mmse1 = transpose(Rhp*inv(Rpp)*H_ls_pin)';
+H_mmse=interp1( pilot_loc(1:end)',H_mmse1(pilot_loc(1:end)),data_station(1:end)','linear','extrap');
+%----------------均衡zf----------------------------------
+
+data_zf1 = data_ls(data_station(1:end),:)./H_mmse;         %ls&zf均衡
+data_back_mmse = reshape(data_zf1,[],1);                   %并串变换
+data_back_mmse = data_back_mmse(1:length(data));           %去除多于填充值
+data_base_back_mmse = pskdemod(data_back_mmse,M,pi/4);     %对过ls&zf的信号进行解调（0 1 2 3）
+
+%% awgn解调
+data_back_awgn = zeros(para,Nb*Ns);
+data_back_awgn(1:26,:) = data_fftn(2:27,:);
+data_back_awgn(27:end,:) = data_fftn(39:end,:);
+data_back_awgn1 = reshape(data_back_awgn,[],1);
+data_base_back_awgn2 = pskdemod(data_back_awgn1,M,pi/4);    %对过ls&zf的信号进行解调（0 1 2 3）
+
+%% 误比特率计算
+[error(kk),~]=biterr(data_base_back_awgn2,qpsk_base1,log2(M));%AWGN信道
+[error1(kk),~]=biterr(data_base_back_ls,qpsk_base1,log2(M));  %AWGN+Rayleigh(ls)信道
+[error2(kk),~]=biterr(data_base_back_mmse,qpsk_base1,log2(M));%AWGN+Rayleigh(mmse)信道
+ber(kk)=error(kk)/(para*log2(M)*Nb*Ns);                       %AWGN信道的误比特率
+ber1(kk)=error1(kk)/(para*log2(M)*Nb*Ns);                     %AWGN+Rayleigh(ls)信道的误比特率
+ber2(kk)=error2(kk)/(para*log2(M)*Nb*Ns);                     %AWGN+Rayleigh(mmse)信道的误比特率
+
+end
+figure(1)
+semilogy(SNR,ber,'r-*',SNR,ber1,'b-<',SNR,ber2,'r->')
+grid on
+title('OFDM系统误比特率性能')
+legend('AWGN高斯信道仿真','Rayleugh信道LS均衡','Rayleigh信道MMSE均衡')
+axis([0 15 10^-8 1])
+xlabel('信噪比（SNR）')
+ylabel('误比特率') 
+
