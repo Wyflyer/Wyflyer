@@ -1,5 +1,5 @@
 - 👋 Hi, I’m @Wyflyer
-- 👀 I’m interested in MIMO_OFDM
+- 👀 I’m interested in OTFS
 - 🌱 I’m currently learning Simulation of communication principle
 
 <!---
